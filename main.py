@@ -1,18 +1,13 @@
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
-import yfinance as yf
-import pandas as pd
 import requests
+import pandas as pd
+from datetime import datetime, timedelta
 
-# Session con User-Agent real para evitar rate limiting de Yahoo
-_session = requests.Session()
-_session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-})
+app = FastAPI(title="InvestMAC", version="10.0.0")
 
-app = FastAPI(title="InvestMAC", version="9.0.0")
+AV_KEY = "62JRDGK1PCC6I6CE"
+AV_BASE = "https://www.alphavantage.co/query"
 
 PEER_MAP = {
     "AAPL": "MSFT", "MSFT": "AAPL",
@@ -37,68 +32,82 @@ def calc_rsi(series: pd.Series, period: int = 14) -> float:
     rs = avg_gain / avg_loss
     return round(100 - (100 / (1 + rs)), 2)
 
-def fetch_metrics(ticker: str) -> dict:
-    t = yf.Ticker(ticker, session=_session)
-    hist = t.history(period="1y")
-    info = t.info or {}
+def av_get(params: dict) -> dict:
+    params["apikey"] = AV_KEY
+    r = requests.get(AV_BASE, params=params, timeout=20)
+    return r.json()
 
-    if hist.empty or len(hist) < 20:
+def fetch_metrics(ticker: str) -> dict:
+    # Precio diario histórico (últimos 12 meses)
+    data = av_get({"function": "TIME_SERIES_DAILY", "symbol": ticker, "outputsize": "compact"})
+
+    ts = data.get("Time Series (Daily)")
+    if not ts:
+        note = data.get("Note") or data.get("Information") or ""
+        if "rate limit" in note.lower() or "call frequency" in note.lower():
+            raise Exception("Rate limit de Alpha Vantage alcanzado. Esperá 1 minuto e intentá de nuevo.")
         return None
 
-    close = hist["Close"]
-    price = round(float(close.iloc[-1]), 2)
-    ret_1y = round((close.iloc[-1] / close.iloc[0] - 1) * 100, 2)
-    daily_ret = close.pct_change().dropna()
+    # Construir serie de cierre ordenada
+    rows = sorted(ts.items())  # (fecha, valores)
+    cutoff = (datetime.today() - timedelta(days=365)).strftime("%Y-%m-%d")
+    rows = [(d, v) for d, v in rows if d >= cutoff]
+    if len(rows) < 20:
+        return None
+
+    dates = [r[0] for r in rows]
+    closes = pd.Series([float(r[1]["4. close"]) for r in rows], index=dates)
+
+    price = round(float(closes.iloc[-1]), 2)
+    ret_1y = round((closes.iloc[-1] / closes.iloc[0] - 1) * 100, 2)
+    daily_ret = closes.pct_change().dropna()
     vol = round(float(daily_ret.std() * (252 ** 0.5) * 100), 2)
-    rsi = calc_rsi(close)
+    rsi = calc_rsi(closes)
+    roll_max = closes.cummax()
+    max_dd = round(float(((closes - roll_max) / roll_max).min() * 100), 2)
 
-    roll_max = close.cummax()
-    drawdown = (close - roll_max) / roll_max
-    max_dd = round(float(drawdown.min() * 100), 2)
+    # Serie semanal base100 (cada ~5 días)
+    step = max(1, len(closes) // 52)
+    sampled = closes.iloc[::step]
+    base = float(sampled.iloc[0])
+    serie = [round(float(v) / base * 100, 2) for v in sampled]
+    labels = list(sampled.index)
 
-    # Fundamentales desde info
-    pe = info.get("trailingPE") or info.get("forwardPE")
-    pe = round(pe, 2) if pe else None
-    roe = info.get("returnOnEquity")
-    roe = round(roe * 100, 2) if roe else None
-    debt_eq = info.get("debtToEquity")
-    debt_eq = round(debt_eq, 2) if debt_eq else None
-    rev_growth = info.get("revenueGrowth")
-    rev_growth = round(rev_growth * 100, 2) if rev_growth else None
-    profit_margin = info.get("profitMargins")
-    profit_margin = round(profit_margin * 100, 2) if profit_margin else None
-    market_cap = info.get("marketCap")
-    name = info.get("shortName") or info.get("longName") or ticker
-    sector = info.get("sector") or "N/D"
-    industry = info.get("industry") or "N/D"
-    country = info.get("country") or "N/D"
-    currency = info.get("currency") or "USD"
+    # Fundamentales: Overview
+    ov = av_get({"function": "OVERVIEW", "symbol": ticker})
+    name = ov.get("Name") or ticker
+    sector = ov.get("Sector") or "N/D"
+    industry = ov.get("Industry") or "N/D"
+    country = ov.get("Country") or "N/D"
+    currency = ov.get("Currency") or "USD"
 
-    # Serie semanal base100 (últimas 52 semanas)
-    weekly = hist["Close"].resample("W").last().dropna()
-    base = float(weekly.iloc[0])
-    serie = [round(float(v) / base * 100, 2) for v in weekly]
-    labels = [str(d.date()) for d in weekly.index]
+    def _f(key):
+        v = ov.get(key)
+        try: return round(float(v), 2) if v and v != "None" else None
+        except: return None
+
+    pe = _f("TrailingPE") or _f("ForwardPE")
+    roe = _f("ReturnOnEquityTTM")
+    if roe: roe = round(roe * 100, 2)
+    debt_eq = _f("DebtToEquityRatio")
+    if debt_eq: debt_eq = round(debt_eq * 100, 2)
+    rev_growth = _f("QuarterlyRevenueGrowthYOY")
+    if rev_growth: rev_growth = round(rev_growth * 100, 2)
+    profit_margin = _f("ProfitMargin")
+    if profit_margin: profit_margin = round(profit_margin * 100, 2)
+    mktcap = ov.get("MarketCapitalization")
+    try: market_cap = int(mktcap) if mktcap and mktcap != "None" else None
+    except: market_cap = None
 
     return {
-        "name": name,
-        "sector": sector,
-        "industry": industry,
-        "country": country,
-        "currency": currency,
-        "price": price,
-        "ret_1y": ret_1y,
-        "vol": vol,
-        "rsi": rsi,
-        "max_dd": max_dd,
-        "pe": pe,
-        "roe": roe,
-        "debt_eq": debt_eq,
-        "rev_growth": rev_growth,
-        "profit_margin": profit_margin,
+        "name": name, "sector": sector, "industry": industry,
+        "country": country, "currency": currency,
+        "price": price, "ret_1y": ret_1y, "vol": vol,
+        "rsi": rsi, "max_dd": max_dd,
+        "pe": pe, "roe": roe, "debt_eq": debt_eq,
+        "rev_growth": rev_growth, "profit_margin": profit_margin,
         "market_cap": market_cap,
-        "serie": serie,
-        "labels": labels,
+        "serie": serie, "labels": labels,
     }
 
 def score_metrics(m: dict, horizon: str) -> dict:
