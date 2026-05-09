@@ -1,9 +1,9 @@
 {
   "version": 2,
   "builds": [
-    { "src": "investmac/api.py", "use": "@vercel/python" }
+    { "src": "api/index.py", "use": "@vercel/python" }
   ],
   "routes": [
-    { "src": "/(.*)", "dest": "investmac/api.py" }
+    { "src": "/(.*)", "dest": "api/index.py" }
   ]
 }
