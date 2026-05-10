@@ -26,7 +26,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📈 Analizador Financiero Pro")
-st.caption("Modo AndyStopLoss (RSI+ASL21+Soportes) | Modo Completo (Técnico+Chartismo+Fundamental) | Cripto: Binance (~100ms)")
+st.caption("Modo AndyStopLoss (RSI+ASL21+Soportes) | Modo Completo (Técnico+Chartismo+Fundamental) | Cripto: Coinbase/Kucoin | Acciones: Yahoo Finance")
 
 # Inicializar session_state
 for key in ['datos', 'analisis', 'simbolo', 'precio_entrada_base', 'modo_analisis', 'info']:
@@ -43,7 +43,6 @@ def calcular_indicadores(df):
     df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
     df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
     
-    # WMA_22 manual
     def calc_wma(series, window):
         weights = np.arange(1, window+1)
         return series.rolling(window).apply(lambda x: np.sum(weights * x) / weights.sum(), raw=True)
@@ -54,14 +53,12 @@ def calcular_indicadores(df):
     df['EMA_150'] = df['Close'].ewm(span=150, adjust=False).mean()
     df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
     
-    # MACD
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Diff'] = df['MACD'] - df['MACD_Signal']
     
-    # RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -72,20 +69,17 @@ def calcular_indicadores(df):
     df['RSI_WMA22'] = calc_wma(df['RSI'], 22)
     df['RSI_ASL21'] = (df['RSI_EMA20'] + df['RSI_WMA22']) / 2
     
-    # Bollinger
     df['BB_Middle'] = df['Close'].rolling(20).mean()
     bb_std = df['Close'].rolling(20).std()
     df['BB_Upper'] = df['BB_Middle'] + 2*bb_std
     df['BB_Lower'] = df['BB_Middle'] - 2*bb_std
     df['BB_Pos'] = 100 * (df['Close'] - df['BB_Lower']) / (df['BB_Upper'] - df['BB_Lower'])
     
-    # Estocástico
     low_14 = df['Low'].rolling(14).min()
     high_14 = df['High'].rolling(14).max()
     df['Stoch_K'] = 100 * ((df['Close'] - low_14) / (high_14 - low_14))
     df['Stoch_D'] = df['Stoch_K'].rolling(3).mean()
     
-    # ATR
     high_low = df['High'] - df['Low']
     high_close = abs(df['High'] - df['Close'].shift())
     low_close = abs(df['Low'] - df['Close'].shift())
@@ -262,25 +256,42 @@ def analisis_andystoploss(df):
     }
 
 # ------------------------------------------------------------
-# OBTENER DATOS
+# OBTENER DATOS DE CRIPTO - MÚLTIPLES EXCHANGES
 # ------------------------------------------------------------
-def obtener_datos_cripto(simbolo_ccxt, intervalo, limite=500):
-    exchange = ccxt.binance()
+def obtener_datos_cripto(simbolo_ccxt, intervalo, limite=200):
+    """Intenta con múltiples exchanges hasta que uno funcione"""
+    
+    # Lista de exchanges que normalmente funcionan en LATAM
+    exchanges = [
+        ('Kucoin', ccxt.kucoin()),
+        ('Gateio', ccxt.gateio()),
+        ('Bybit', ccxt.bybit()),
+        ('OKX', ccxt.okx()),
+        ('Bitget', ccxt.bitget()),
+    ]
+    
     timeframe_map = {'1d': '1d', '4h': '4h', '45min': '45m', '15min': '15m', '5min': '5m'}
     timeframe = timeframe_map.get(intervalo, '1d')
     
-    try:
-        ohlcv = exchange.fetch_ohlcv(simbolo_ccxt, timeframe=timeframe, limit=limite)
-        if not ohlcv:
-            return pd.DataFrame()
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        return df
-    except Exception as e:
-        st.error(f"Error Binance: {e}")
-        return pd.DataFrame()
+    for exchange_name, exchange in exchanges:
+        try:
+            # Configurar timeout
+            exchange.timeout = 10000
+            ohlcv = exchange.fetch_ohlcv(simbolo_ccxt, timeframe=timeframe, limit=limite)
+            if ohlcv and len(ohlcv) > 0:
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df.set_index('timestamp', inplace=True)
+                st.info(f" Usando {exchange_name} para datos de {simbolo_ccxt}")
+                return df
+        except Exception as e:
+            continue  # Si falla, probamos el siguiente
+    
+    return pd.DataFrame()
 
+# ------------------------------------------------------------
+# OBTENER DATOS DE ACCIONES
+# ------------------------------------------------------------
 def obtener_datos_accion(simbolo, periodo, intervalo):
     ticker = yf.Ticker(simbolo)
     yf_interval_map = {'1d': '1d', '4h': '1h', '45min': '30m', '15min': '15m', '5min': '5m'}
@@ -342,12 +353,12 @@ if analizar_btn or (st.session_state.datos is not None and simbolo != st.session
             es_cripto = simbolo.endswith('-USD')
             
             if es_cripto:
-                simbolo_binance = simbolo.replace('-USD', '/USDT')
-                df = obtener_datos_cripto(simbolo_binance, intervalo, limite=500)
+                simbolo_clean = simbolo.replace('-USD', '/USDT')
+                df = obtener_datos_cripto(simbolo_clean, intervalo, limite=200)
                 if df.empty:
-                    st.error("No se obtuvieron datos de Binance")
+                    st.error("No se pudieron obtener datos de criptomonedas. Probá con: BTC/USDT, ETH/USDT, o cambiá a acciones (KO, AAPL)")
                     st.stop()
-                fuente = f"Binance (~100ms) - {intervalo}"
+                fuente = f"Cripto (Kucoin/Gateio/Bybit) - {intervalo}"
                 info = None
             else:
                 df, ticker = obtener_datos_accion(simbolo, periodo, intervalo)
@@ -364,8 +375,6 @@ if analizar_btn or (st.session_state.datos is not None and simbolo != st.session
             
             if modo_analisis == "AndyStopLoss":
                 analisis = analisis_andystoploss(df)
-                chartismo = None
-                fundamental = None
                 
                 if usar_soporte and analisis.get('soportes') and analisis['soportes']:
                     precio_entrada_sugerido = analisis['soportes'][0]
@@ -404,9 +413,7 @@ if analizar_btn or (st.session_state.datos is not None and simbolo != st.session
                     'sma30': df['SMA_30'].iloc[-1],
                     'fundamental_punt': fundamental['puntuacion'],
                     'tecnico_punt': analisis_tecnico['puntuacion'],
-                    'chartismo_punt': chartismo['puntuacion'],
-                    'explicaciones': analisis_tecnico['señales'][:4],
-                    'explicaciones_fund': fundamental['explicaciones']
+                    'chartismo_punt': chartismo['puntuacion']
                 }
                 
                 precio_entrada_sugerido = analisis['precio']
@@ -460,17 +467,13 @@ if st.session_state.analisis is not None:
     riesgo_real = (perdida_esperada / capital_total) * 100 if capital_total > 0 else 0
     reward_risk = (tp1 - precio_entrada) / (precio_entrada - stop_loss) if (precio_entrada - stop_loss) > 0 else 0
     
-    # Tarjeta de decisión
     st.markdown(f"""
     <div style='background-color:{a['color']}20; padding:6px; border-radius:12px; margin-bottom:10px; text-align:center'>
         <h2 style='margin:0; color:{a['color']}'>{a['decision']}</h2>
-        <p style='margin:0; font-size:0.8rem'>
-            Modo: {modo} | Velas: {len(df)}
-        </p>
+        <p style='margin:0; font-size:0.8rem'>Modo: {modo} | Velas: {len(df)}</p>
     </div>
     """, unsafe_allow_html=True)
     
-    # SECCIÓN DE ALERTA PARA TRADINGVIEW
     st.markdown("---")
     st.subheader(" CONFIGURAR ALERTA EN TRADINGVIEW")
     
@@ -499,7 +502,6 @@ if st.session_state.analisis is not None:
     
     st.code(mensaje_alerta, language="text")
     
-    # Métricas
     st.markdown("---")
     col1, col2, col3, col4 = st.columns(4)
     with col1: st.metric(" Precio Actual", f"${a['precio']:,.2f}")
@@ -507,7 +509,6 @@ if st.session_state.analisis is not None:
     with col3: st.metric(" ASL21", f"${a.get('asl21', 0):,.2f}")
     with col4: st.metric(" Entrada Objetivo", f"${precio_entrada:,.2f}")
     
-    # Señales
     col_ent, col_sal = st.columns(2)
     with col_ent:
         st.caption(" **Señales Positivas**")
@@ -518,7 +519,6 @@ if st.session_state.analisis is not None:
         for s in a.get('sen_sal', ['No hay señales'])[:2]:
             st.write(f"- {s}")
     
-    # Gráficos
     st.markdown("---")
     tab1, tab2 = st.tabs([" Gráfico Principal", " RSI"])
     with tab1:
