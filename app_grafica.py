@@ -26,7 +26,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📈 Analizador Financiero Pro")
-st.caption("Modo AndyStopLoss (RSI+ASL21+Soportes) | Modo Completo (Técnico+Chartismo+Fundamental) | Cripto: Coinbase/Kucoin | Acciones: Yahoo Finance")
+st.caption("Modo AndyStopLoss (ASL21 prioritario) | Modo Completo | Cripto: Kucoin/Gateio/Bybit")
 
 # Inicializar session_state
 for key in ['datos', 'analisis', 'simbolo', 'precio_entrada_base', 'modo_analisis', 'info']:
@@ -57,7 +57,6 @@ def calcular_indicadores(df):
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['MACD_Diff'] = df['MACD'] - df['MACD_Signal']
     
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
@@ -200,6 +199,13 @@ def analisis_fundamental(simbolo, info):
     return {'puntuacion': punt, 'explicaciones': expl, 'accion': 'INVERTIR' if punt>=50 else 'EVITAR'}
 
 def analisis_andystoploss(df):
+    """
+    Método AndyStopLoss
+    PRIORIDAD: ASL21 sobre RSI
+    - Si precio pierde ASL21 -> SEÑAL DE VENTA (evita comprar en caídas libres)
+    - Si precio sobre ASL21 + RSI<30 -> COMPRA
+    - Si precio bajo ASL21 + RSI>70 -> VENTA
+    """
     ult = df.iloc[-1]
     precios = df['Close'].values
     orden = max(3, min(10, len(precios)//20))
@@ -209,37 +215,59 @@ def analisis_andystoploss(df):
     resistencias = [round(precios[i],2) for i in maximos[-3:] if i < len(precios)]
     
     punt_ent, sen_ent = 0, []
+    punt_sal, sen_sal = 0, []
+    
+    # ========== REGLAS DE ENTRADA (COMPRA) ==========
+    # 1. Soporte (max 30 puntos)
     if soportes and abs(ult['Close'] - soportes[0]) / ult['Close'] < 0.02:
         punt_ent += 30
         sen_ent.append(f" Soporte ${soportes[0]:,.2f}")
+    
+    # 2. RSI sobreventa (max 25 puntos)
     if ult['RSI'] < 30:
         punt_ent += 25
         sen_ent.append(f" RSI {ult['RSI']:.0f} (sobreventa)")
+    
+    # 3. PRECIO SOBRE ASL21 (CRÍTICO - condiciona entrada)
     if ult['Close'] > ult['ASL21']:
         punt_ent += 15
         sen_ent.append(f" Sobre ASL21 ${ult['ASL21']:,.2f}")
+    else:
+        # Si el precio está BAJO ASL21, anula la mayoría de las señales de compra
+        sen_ent.append(f" PRECIO BAJO ASL21 - Señal de COMPRA debilitada")
+    
+    # 4. Sobre EMAs largas (max 10 puntos)
     if ult['Close'] > ult['EMA_150'] and ult['Close'] > ult['EMA_200']:
         punt_ent += 10
         sen_ent.append(" Sobre EMAs 150/200")
     
-    punt_sal, sen_sal = 0, []
+    # ========== REGLAS DE SALIDA (VENTA) ==========
+    # 1. Resistencia (max 30 puntos)
     if resistencias and abs(resistencias[0] - ult['Close']) / ult['Close'] < 0.02:
         punt_sal += 30
         sen_sal.append(f" Resistencia ${resistencias[0]:,.2f}")
+    
+    # 2. RSI sobrecompra (max 30 puntos)
     if ult['RSI'] > 70:
         punt_sal += 30
         sen_sal.append(f" RSI {ult['RSI']:.0f} (sobrecompra)")
+    
+    # 3. PRECIO BAJO ASL21 (CRÍTICO - señal de VENTA prioritaria)
     if ult['Close'] < ult['ASL21']:
-        punt_sal += 25
-        sen_sal.append(f" Bajo ASL21 ${ult['ASL21']:,.2f}")
+        punt_sal += 35  # Peso alto para priorizar ASL21
+        sen_sal.append(f" PRECIO BAJO ASL21 ${ult['ASL21']:,.2f} - SEÑAL DE VENTA")
+    
+    # 4. Bajo SMA30 (max 20 puntos)
     if ult['Close'] < ult['SMA_30']:
         punt_sal += 20
         sen_sal.append(f" Bajo SMA30 ${ult['SMA_30']:,.2f}")
     
+    # ========== DECISIÓN FINAL ==========
     neta = punt_ent - punt_sal
-    if neta >= 40 and punt_ent >= 50:
+    
+    if neta >= 40 and punt_ent >= 50 and ult['Close'] > ult['ASL21']:
         decision, color = " COMPRAR", "green"
-    elif punt_sal >= 40:
+    elif punt_sal >= 40 or (ult['Close'] < ult['ASL21'] and punt_sal >= 20):
         decision, color = " VENDER", "red"
     elif punt_ent >= 30:
         decision, color = " DUDAR", "orange"
@@ -261,7 +289,6 @@ def analisis_andystoploss(df):
 def obtener_datos_cripto(simbolo_ccxt, intervalo, limite=200):
     """Intenta con múltiples exchanges hasta que uno funcione"""
     
-    # Lista de exchanges que normalmente funcionan en LATAM
     exchanges = [
         ('Kucoin', ccxt.kucoin()),
         ('Gateio', ccxt.gateio()),
@@ -275,23 +302,19 @@ def obtener_datos_cripto(simbolo_ccxt, intervalo, limite=200):
     
     for exchange_name, exchange in exchanges:
         try:
-            # Configurar timeout
             exchange.timeout = 10000
             ohlcv = exchange.fetch_ohlcv(simbolo_ccxt, timeframe=timeframe, limit=limite)
             if ohlcv and len(ohlcv) > 0:
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 df.set_index('timestamp', inplace=True)
-                st.info(f" Usando {exchange_name} para datos de {simbolo_ccxt}")
+                st.info(f" Usando {exchange_name} para {simbolo_ccxt}")
                 return df
         except Exception as e:
-            continue  # Si falla, probamos el siguiente
+            continue
     
     return pd.DataFrame()
 
-# ------------------------------------------------------------
-# OBTENER DATOS DE ACCIONES
-# ------------------------------------------------------------
 def obtener_datos_accion(simbolo, periodo, intervalo):
     ticker = yf.Ticker(simbolo)
     yf_interval_map = {'1d': '1d', '4h': '1h', '45min': '30m', '15min': '15m', '5min': '5m'}
@@ -338,17 +361,16 @@ with st.sidebar:
     if modo_analisis == "AndyStopLoss":
         usar_soporte = st.checkbox(" Entrar en SOPORTE (sugerido)", value=True)
         st.caption(" Reglas AndyStopLoss")
-        st.caption("Entrada: SOPORTE o RSI<30 | SL: pierde ASL21/SMA30")
+        st.caption("ASL21 prioritario | Si pierde ASL21 → VENDER")
     else:
         usar_soporte = False
         st.caption(" Modo Completo")
-        st.caption("Técnico (EMA, MACD, RSI, Bollinger, Estocástico) + Chartismo + Fundamental")
 
 # ------------------------------------------------------------
 # PROCESAR ANÁLISIS
 # ------------------------------------------------------------
 if analizar_btn or (st.session_state.datos is not None and simbolo != st.session_state.simbolo):
-    with st.spinner(f'Analizando {simbolo} con modo {modo_analisis[:15]}...'):
+    with st.spinner(f'Analizando {simbolo}...'):
         try:
             es_cripto = simbolo.endswith('-USD')
             
@@ -356,7 +378,7 @@ if analizar_btn or (st.session_state.datos is not None and simbolo != st.session
                 simbolo_clean = simbolo.replace('-USD', '/USDT')
                 df = obtener_datos_cripto(simbolo_clean, intervalo, limite=200)
                 if df.empty:
-                    st.error("No se pudieron obtener datos de criptomonedas. Probá con: BTC/USDT, ETH/USDT, o cambiá a acciones (KO, AAPL)")
+                    st.error("No se pudieron obtener datos. Probá con BTC/USDT, ETH/USDT, o acciones (KO, AAPL)")
                     st.stop()
                 fuente = f"Cripto (Kucoin/Gateio/Bybit) - {intervalo}"
                 info = None
@@ -432,7 +454,7 @@ if analizar_btn or (st.session_state.datos is not None and simbolo != st.session
             st.session_state.capital_total = capital_total
             st.session_state.riesgo_cap_pct = riesgo_cap_pct
             
-            st.success(f" {simbolo.upper()} - {len(df)} velas - {fuente} - Modo: {modo_analisis}")
+            st.success(f" {simbolo.upper()} - {len(df)} velas - {fuente}")
             
         except Exception as e:
             st.error(f"Error: {e}")
@@ -467,48 +489,60 @@ if st.session_state.analisis is not None:
     riesgo_real = (perdida_esperada / capital_total) * 100 if capital_total > 0 else 0
     reward_risk = (tp1 - precio_entrada) / (precio_entrada - stop_loss) if (precio_entrada - stop_loss) > 0 else 0
     
+    # Tarjeta de decisión
     st.markdown(f"""
     <div style='background-color:{a['color']}20; padding:6px; border-radius:12px; margin-bottom:10px; text-align:center'>
         <h2 style='margin:0; color:{a['color']}'>{a['decision']}</h2>
-        <p style='margin:0; font-size:0.8rem'>Modo: {modo} | Velas: {len(df)}</p>
+        <p style='margin:0; font-size:0.8rem'>Modo: {modo} | Velas: {len(df)} | Entrada: {a.get('punt_ent', 0)} | Salida: {a.get('punt_sal', 0)}</p>
     </div>
     """, unsafe_allow_html=True)
     
+    # ============================================================
+    # SECCIÓN DE ALERTA - SOLO PARA COMPRA O DUDAR
+    # ============================================================
     st.markdown("---")
-    st.subheader(" CONFIGURAR ALERTA EN TRADINGVIEW")
     
-    col_alerta1, col_alerta2 = st.columns([1, 1])
-    with col_alerta1:
-        st.markdown(f"""
-        <div style='background-color:#1e3a5f; padding:10px; border-radius:10px; margin:5px 0'>
-            <h4 style='margin:0'> PRECIO DE ENTRADA</h4>
-            <p style='font-size:24px; margin:5px 0'><b>${precio_entrada:,.2f}</b></p>
-            <p style='margin:0; font-size:12px'>{st.session_state.razon_entrada}</p>
-        </div>
-        """, unsafe_allow_html=True)
+    if a['decision'] in [" COMPRAR", " DUDAR"]:
+        st.subheader(" CONFIGURAR ALERTA EN TRADINGVIEW")
+        
+        col_alerta1, col_alerta2 = st.columns([1, 1])
+        with col_alerta1:
+            st.markdown(f"""
+            <div style='background-color:#1e3a5f; padding:10px; border-radius:10px; margin:5px 0'>
+                <h4 style='margin:0'> PRECIO DE ENTRADA</h4>
+                <p style='font-size:24px; margin:5px 0'><b>${precio_entrada:,.2f}</b></p>
+                <p style='margin:0; font-size:12px'>{st.session_state.razon_entrada}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col_alerta2:
+            st.markdown(f"""
+            <div style='background-color:#2d2d2d; padding:10px; border-radius:10px; margin:5px 0'>
+                <h4 style='margin:0'> STOP LOSS</h4>
+                <p style='font-size:20px; margin:5px 0'><b>${stop_loss:,.2f}</b></p>
+                <p style='margin:0; font-size:12px'>Pérdida: -${abs(perdida_esperada):,.0f} ({sl_pct:.0f}%)</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown("###  Cómo configurar la alerta en TradingView:")
+        
+        mensaje_alerta = f" ALERTA {st.session_state.simbolo.upper()}! Precio alcanzó ${precio_entrada:,.2f} | Stop Loss: ${stop_loss:,.2f} ({sl_pct:.0f}%) | Take Profit 1: ${tp1:,.2f} ({tp1_pct:.0f}%) | Take Profit 2: ${tp2:,.2f} ({tp2_pct:.0f}%) | Invertir: ${capital_invertir:,.0f} ({riesgo_cap_pct:.0f}% del capital)"
+        
+        st.code(mensaje_alerta, language="text")
+    else:
+        st.info("📌 **La señal actual es VENDER o ESPERAR. No se sugiere entrada en este momento.**")
+        st.caption("Según el método AndyStopLoss, cuando el precio pierde ASL21, la prioridad es VENDER/ESPERAR, evitando comprar en caídas libres.")
     
-    with col_alerta2:
-        st.markdown(f"""
-        <div style='background-color:#2d2d2d; padding:10px; border-radius:10px; margin:5px 0'>
-            <h4 style='margin:0'> STOP LOSS</h4>
-            <p style='font-size:20px; margin:5px 0'><b>${stop_loss:,.2f}</b></p>
-            <p style='margin:0; font-size:12px'>Pérdida: -${abs(perdida_esperada):,.0f} ({sl_pct:.0f}%)</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    st.markdown("###  Cómo configurar la alerta en TradingView:")
-    
-    mensaje_alerta = f" ALERTA {st.session_state.simbolo.upper()}! Precio alcanzó ${precio_entrada:,.2f} | Stop Loss: ${stop_loss:,.2f} ({sl_pct:.0f}%) | Take Profit 1: ${tp1:,.2f} ({tp1_pct:.0f}%) | Take Profit 2: ${tp2:,.2f} ({tp2_pct:.0f}%) | Invertir: ${capital_invertir:,.0f} ({riesgo_cap_pct:.0f}% del capital)"
-    
-    st.code(mensaje_alerta, language="text")
-    
+    # Métricas principales
     st.markdown("---")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1: st.metric(" Precio Actual", f"${a['precio']:,.2f}")
     with col2: st.metric(" RSI", f"{a['rsi']:.0f}")
     with col3: st.metric(" ASL21", f"${a.get('asl21', 0):,.2f}")
-    with col4: st.metric(" Entrada Objetivo", f"${precio_entrada:,.2f}")
+    with col4: st.metric(" SMA30", f"${a.get('sma30', 0):,.2f}")
+    with col5: st.metric(" Entrada Objetivo", f"${precio_entrada:,.2f}")
     
+    # Señales
     col_ent, col_sal = st.columns(2)
     with col_ent:
         st.caption(" **Señales Positivas**")
@@ -516,9 +550,10 @@ if st.session_state.analisis is not None:
             st.write(f"- {s}")
     with col_sal:
         st.caption(" **Señales Negativas**")
-        for s in a.get('sen_sal', ['No hay señales'])[:2]:
+        for s in a.get('sen_sal', ['No hay señales'])[:3]:
             st.write(f"- {s}")
     
+    # Gráficos
     st.markdown("---")
     tab1, tab2 = st.tabs([" Gráfico Principal", " RSI"])
     with tab1:
@@ -527,6 +562,8 @@ if st.session_state.analisis is not None:
         fig.add_trace(go.Scatter(x=df.index, y=df['EMA_9'], name='EMA 9', line=dict(color='orange', width=1)))
         fig.add_trace(go.Scatter(x=df.index, y=df['ASL21'], name='ASL21', line=dict(color='purple', width=2)))
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_30'], name='SMA30', line=dict(color='red', dash='dash')))
+        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_150'], name='EMA150', line=dict(color='blue', width=1, dash='dot')))
+        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_200'], name='EMA200', line=dict(color='cyan', width=1, dash='dot')))
         fig.add_hline(y=precio_entrada, line_dash="dash", line_color="green", annotation_text=f"ENTRADA ${precio_entrada:,.2f}")
         fig.add_hline(y=stop_loss, line_dash="dash", line_color="red", annotation_text=f"STOP ${stop_loss:,.2f}")
         fig.update_layout(height=480, margin=dict(l=0,r=0,t=30,b=0), template='plotly_dark')
