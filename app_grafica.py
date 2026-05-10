@@ -35,12 +35,12 @@ for key in ['datos', 'analisis', 'simbolo', 'precio_entrada_base', 'modo_analisi
         st.session_state[key] = None
 
 # ============================================================
-# LISTA DE ACTIVOS PARA EXPLORADOR
+# LISTA DE ACTIVOS PARA EXPLORADOR (reducida para mejor rendimiento)
 # ============================================================
 ACTIVOS_POR_DEFECTO = {
-    "Cripto": ["BTC-USD", "ETH-USD", "SOL-USD", "ADA-USD", "DOGE-USD", "XRP-USD", "DOT-USD", "LINK-USD"],
-    "Acciones US": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "KO", "PEP", "JPM", "V", "MA", "DIS", "NFLX", "AMD"],
-    "Acciones AR": ["GGAL", "YPF", "PAM", "BMA", "TEO", "EDN", "CEPU", "LOMA", "MELI"],
+    "Cripto": ["BTC-USD", "ETH-USD", "SOL-USD", "ADA-USD"],
+    "Acciones US": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "KO"],
+    "Acciones AR": ["GGAL", "YPF", "PAM", "BMA"],
 }
 
 # ============================================================
@@ -87,27 +87,22 @@ def analisis_completo_para_explorador(df, modo):
     ult = df.iloc[-1]
     
     if modo == "AndyStopLoss":
-        # Calcular puntuación AndyStopLoss (ASL21 prioritario)
         punt_ent = 0
         punt_sal = 0
         
-        # Sobre ASL21?
         if ult['Close'] > ult['ASL21']:
             punt_ent += 15
         else:
             punt_sal += 35
         
-        # RSI
         if ult['RSI'] < 30:
             punt_ent += 25
         elif ult['RSI'] > 70:
             punt_sal += 30
         
-        # MACD
         if ult['MACD'] > ult['MACD_Signal']:
             punt_ent += 20
         
-        # SMA30
         if ult['Close'] < ult['SMA_30']:
             punt_sal += 15
         
@@ -115,29 +110,22 @@ def analisis_completo_para_explorador(df, modo):
         
         if puntuacion >= 40 and ult['Close'] > ult['ASL21']:
             decision = "COMPRAR"
-            color = "green"
         elif punt_sal >= 40:
             decision = "VENDER"
-            color = "red"
         elif punt_ent >= 30:
             decision = "DUDAR"
-            color = "orange"
         else:
             decision = "ESPERAR"
-            color = "gray"
         
         return {
             'puntuacion': puntuacion,
             'decision': decision,
-            'color': color,
             'precio': ult['Close'],
             'rsi': ult['RSI'],
             'asl21': ult['ASL21'],
             'sma30': ult['SMA_30']
         }
-    
     else:  # Modo Completo
-        # Técnico
         punt = 0
         if ult['Close'] > ult['EMA_9'] and ult['Close'] > ult['EMA_21']:
             punt += 20
@@ -157,7 +145,6 @@ def analisis_completo_para_explorador(df, modo):
         if ult['BB_Pos'] < 20:
             punt += 15
         
-        # Chartismo simplificado (solo tendencia)
         precios = df['Close'].values[-20:]
         if len(precios) >= 20:
             pend = np.polyfit(range(20), precios, 1)[0]
@@ -168,18 +155,14 @@ def analisis_completo_para_explorador(df, modo):
         
         if punt >= 65:
             decision = "COMPRAR"
-            color = "green"
         elif punt >= 45:
             decision = "DUDAR"
-            color = "orange"
         else:
             decision = "NO COMPRAR"
-            color = "red"
         
         return {
             'puntuacion': punt,
             'decision': decision,
-            'color': color,
             'precio': ult['Close'],
             'rsi': ult['RSI'],
             'asl21': ult['ASL21'],
@@ -187,35 +170,36 @@ def analisis_completo_para_explorador(df, modo):
         }
 
 def obtener_datos_activo(simbolo, intervalo='1d'):
-    """Obtiene datos de un activo (cripto o acción) de forma rápida"""
+    """Obtiene datos de un activo (cripto o acción) de forma robusta"""
     try:
         if simbolo.endswith('-USD'):
-            # Es cripto - usar exchanges
-            for exchange_name, exchange in [('Kucoin', ccxt.kucoin()), ('Gateio', ccxt.gateio()), ('Bybit', ccxt.bybit())]:
-                try:
-                    exchange.timeout = 10000
-                    simbolo_clean = simbolo.replace('-USD', '/USDT')
-                    timeframe = '1d' if intervalo == '1d' else '1h'
-                    ohlcv = exchange.fetch_ohlcv(simbolo_clean, timeframe=timeframe, limit=50)
-                    if ohlcv and len(ohlcv) > 0:
-                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
-                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                        df.set_index('timestamp', inplace=True)
-                        return df, None
-                except:
-                    continue
-            return pd.DataFrame(), None
+            # Cripto: usar solo Kucoin (más fiable)
+            try:
+                exchange = ccxt.kucoin()
+                exchange.timeout = 15000
+                simbolo_clean = simbolo.replace('-USD', '/USDT')
+                timeframe = '1d' if intervalo == '1d' else '1h'
+                ohlcv = exchange.fetch_ohlcv(simbolo_clean, timeframe=timeframe, limit=60)
+                if ohlcv and len(ohlcv) > 0:
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    df.set_index('timestamp', inplace=True)
+                    return df, None
+            except Exception as e:
+                return pd.DataFrame(), None
         else:
-            # Es acción
+            # Acción
             ticker = yf.Ticker(simbolo)
             df = ticker.history(period='1mo', interval='1d')
+            if df.empty:
+                return pd.DataFrame(), None
             return df, ticker.info
-    except:
+    except Exception:
         return pd.DataFrame(), None
 
-# ============================================================
-# FUNCIONES PRINCIPALES (igual que antes)
-# ============================================================
+# ------------------------------------------------------------
+# FUNCIONES PRINCIPALES (análisis detallado)
+# ------------------------------------------------------------
 def analisis_chartismo(df):
     precios = df['Close'].values
     orden = max(3, min(10, len(precios)//20))
@@ -369,10 +353,10 @@ def analisis_andystoploss(df):
     }
 
 # ------------------------------------------------------------
-# OBTENER DATOS
+# OBTENER DATOS (para análisis individual)
 # ------------------------------------------------------------
 def obtener_datos_cripto(simbolo_ccxt, intervalo, limite=200):
-    exchanges = [('Kucoin', ccxt.kucoin()), ('Gateio', ccxt.gateio()), ('Bybit', ccxt.bybit()), ('OKX', ccxt.okx()), ('Bitget', ccxt.bitget())]
+    exchanges = [('Kucoin', ccxt.kucoin()), ('Gateio', ccxt.gateio()), ('Bybit', ccxt.bybit())]
     timeframe_map = {'1d': '1d', '4h': '4h', '45min': '45m', '15min': '15m', '5min': '5m'}
     timeframe = timeframe_map.get(intervalo, '1d')
     
@@ -403,7 +387,7 @@ def obtener_datos_accion(simbolo, periodo, intervalo):
     return df, ticker
 
 # ============================================================
-# SIDEBAR (simplificado)
+# SIDEBAR
 # ============================================================
 with st.sidebar:
     st.header(" Configuración")
@@ -444,7 +428,7 @@ with st.sidebar:
 tab_analisis, tab_explorador = st.tabs(["📊 Análisis Individual", "🔍 Explorador de Oportunidades"])
 
 # ------------------------------------------------------------
-# TAB 1: ANÁLISIS INDIVIDUAL (igual que antes)
+# TAB 1: ANÁLISIS INDIVIDUAL
 # ------------------------------------------------------------
 with tab_analisis:
     if analizar_btn or (st.session_state.datos is not None and simbolo != st.session_state.simbolo):
@@ -456,9 +440,9 @@ with tab_analisis:
                     simbolo_clean = simbolo.replace('-USD', '/USDT')
                     df = obtener_datos_cripto(simbolo_clean, intervalo, limite=200)
                     if df.empty:
-                        st.error("No se pudieron obtener datos. Probá con BTC/USDT, ETH/USDT, o acciones (KO, AAPL)")
+                        st.error("No se pudieron obtener datos de criptomonedas. Probá con acciones (KO, AAPL).")
                         st.stop()
-                    fuente = f"Cripto (Kucoin/Gateio/Bybit) - {intervalo}"
+                    fuente = f"Cripto - {intervalo}"
                     info = None
                 else:
                     df, ticker = obtener_datos_accion(simbolo, periodo, intervalo)
@@ -611,11 +595,11 @@ with tab_analisis:
         st.plotly_chart(fig, use_container_width=True)
 
 # ------------------------------------------------------------
-# TAB 2: EXPLORADOR DE OPORTUNIDADES (NUEVO)
+# TAB 2: EXPLORADOR DE OPORTUNIDADES (VERSIÓN ROBUSTA)
 # ------------------------------------------------------------
 with tab_explorador:
     st.subheader("🔍 Buscador Automático de Oportunidades")
-    st.caption("Analiza automáticamente una lista de activos y muestra los 5 mejores según el modo seleccionado")
+    st.caption("Analiza automáticamente una lista de activos y muestra los mejores según el modo seleccionado")
     
     col_filtro1, col_filtro2, col_filtro3 = st.columns(3)
     with col_filtro1:
@@ -625,7 +609,7 @@ with tab_explorador:
     with col_filtro3:
         top_n = st.selectbox("Mostrar:", [5, 10, 15], index=0)
     
-    # Seleccionar activos según categoría
+    # Seleccionar activos según categoría (limitado para rendimiento)
     if categoria == "Cripto":
         activos = ACTIVOS_POR_DEFECTO["Cripto"]
     elif categoria == "Acciones US":
@@ -644,24 +628,27 @@ with tab_explorador:
             status_text.text(f"Analizando {activo} ({i+1}/{len(activos)})...")
             progress_bar.progress((i+1)/len(activos))
             
-            df, _ = obtener_datos_activo(activo, intervalo='1d')
-            if df.empty or len(df) < 30:
+            try:
+                df, _ = obtener_datos_activo(activo, intervalo='1d')
+                if df is None or df.empty or len(df) < 30:
+                    continue
+                
+                df = calcular_indicadores(df)
+                resultado = analisis_completo_para_explorador(df, modo_explorador)
+                
+                resultados.append({
+                    'Símbolo': activo,
+                    'Precio': resultado['precio'],
+                    'Puntuación': resultado['puntuacion'],
+                    'Decisión': resultado['decision'],
+                    'RSI': resultado['rsi'],
+                    'ASL21': resultado['asl21'],
+                    'Distancia ASL21': ((resultado['precio'] - resultado['asl21']) / resultado['asl21']) * 100
+                })
+            except Exception:
                 continue
             
-            df = calcular_indicadores(df)
-            resultado = analisis_completo_para_explorador(df, modo_explorador)
-            
-            resultados.append({
-                'Símbolo': activo,
-                'Precio': resultado['precio'],
-                'Puntuación': resultado['puntuacion'],
-                'Decisión': resultado['decision'],
-                'RSI': resultado['rsi'],
-                'ASL21': resultado['asl21'],
-                'Distancia ASL21': ((resultado['precio'] - resultado['asl21']) / resultado['asl21']) * 100
-            })
-            
-            time.sleep(0.3)  # Pequeña pausa para no sobrecargar APIs
+            time.sleep(0.3)
         
         progress_bar.empty()
         status_text.empty()
@@ -670,7 +657,6 @@ with tab_explorador:
             df_resultados = pd.DataFrame(resultados)
             df_resultados = df_resultados.sort_values('Puntuación', ascending=False).head(top_n)
             
-            # Mostrar TOP
             st.markdown(f"### 🏆 TOP {top_n} MEJORES OPORTUNIDADES")
             st.markdown(f"**Modo:** {modo_explorador}")
             
@@ -699,8 +685,8 @@ with tab_explorador:
                 </div>
                 """, unsafe_allow_html=True)
             
-            # Mostrar tabla completa
             with st.expander("📋 Ver todos los resultados (tabla completa)"):
                 st.dataframe(df_resultados, use_container_width=True)
         else:
-            st.error("No se pudieron analizar activos. Verifica tu conexión.")
+            st.error("No se pudieron analizar activos. Verifica tu conexión o selecciona una categoría más pequeña.")
+            st.info("**Sugerencia:** Probá con 'Cripto' o 'Acciones US' primero. La app funciona mejor localmente.")
