@@ -6,6 +6,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 from scipy.signal import argrelextrema
 import ccxt
+import time
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -26,16 +27,25 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📈 Analizador Financiero Pro")
-st.caption("Modo AndyStopLoss (ASL21 prioritario) | Modo Completo | Cripto: Kucoin/Gateio/Bybit")
+st.caption("Modo AndyStopLoss (ASL21 prioritario) | Modo Completo | Explorador de oportunidades")
 
 # Inicializar session_state
 for key in ['datos', 'analisis', 'simbolo', 'precio_entrada_base', 'modo_analisis', 'info']:
     if key not in st.session_state:
         st.session_state[key] = None
 
-# ------------------------------------------------------------
-# FUNCIONES DE INDICADORES COMUNES
-# ------------------------------------------------------------
+# ============================================================
+# LISTA DE ACTIVOS PARA EXPLORADOR
+# ============================================================
+ACTIVOS_POR_DEFECTO = {
+    "Cripto": ["BTC-USD", "ETH-USD", "SOL-USD", "ADA-USD", "DOGE-USD", "XRP-USD", "DOT-USD", "LINK-USD"],
+    "Acciones US": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "KO", "PEP", "JPM", "V", "MA", "DIS", "NFLX", "AMD"],
+    "Acciones AR": ["GGAL", "YPF", "PAM", "BMA", "TEO", "EDN", "CEPU", "LOMA", "MELI"],
+}
+
+# ============================================================
+# FUNCIONES DE INDICADORES
+# ============================================================
 def calcular_indicadores(df):
     df = df.copy()
     df['EMA_9'] = df['Close'].ewm(span=9, adjust=False).mean()
@@ -64,29 +74,148 @@ def calcular_indicadores(df):
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    df['RSI_EMA20'] = df['RSI'].ewm(span=20, adjust=False).mean()
-    df['RSI_WMA22'] = calc_wma(df['RSI'], 22)
-    df['RSI_ASL21'] = (df['RSI_EMA20'] + df['RSI_WMA22']) / 2
-    
     df['BB_Middle'] = df['Close'].rolling(20).mean()
     bb_std = df['Close'].rolling(20).std()
     df['BB_Upper'] = df['BB_Middle'] + 2*bb_std
     df['BB_Lower'] = df['BB_Middle'] - 2*bb_std
     df['BB_Pos'] = 100 * (df['Close'] - df['BB_Lower']) / (df['BB_Upper'] - df['BB_Lower'])
     
-    low_14 = df['Low'].rolling(14).min()
-    high_14 = df['High'].rolling(14).max()
-    df['Stoch_K'] = 100 * ((df['Close'] - low_14) / (high_14 - low_14))
-    df['Stoch_D'] = df['Stoch_K'].rolling(3).mean()
-    
-    high_low = df['High'] - df['Low']
-    high_close = abs(df['High'] - df['Close'].shift())
-    low_close = abs(df['Low'] - df['Close'].shift())
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(1)
-    df['ATR'] = tr.rolling(14).mean()
-    
     return df
 
+def analisis_completo_para_explorador(df, modo):
+    """Versión simplificada para el explorador (más rápida)"""
+    ult = df.iloc[-1]
+    
+    if modo == "AndyStopLoss":
+        # Calcular puntuación AndyStopLoss (ASL21 prioritario)
+        punt_ent = 0
+        punt_sal = 0
+        
+        # Sobre ASL21?
+        if ult['Close'] > ult['ASL21']:
+            punt_ent += 15
+        else:
+            punt_sal += 35
+        
+        # RSI
+        if ult['RSI'] < 30:
+            punt_ent += 25
+        elif ult['RSI'] > 70:
+            punt_sal += 30
+        
+        # MACD
+        if ult['MACD'] > ult['MACD_Signal']:
+            punt_ent += 20
+        
+        # SMA30
+        if ult['Close'] < ult['SMA_30']:
+            punt_sal += 15
+        
+        puntuacion = punt_ent - punt_sal
+        
+        if puntuacion >= 40 and ult['Close'] > ult['ASL21']:
+            decision = "COMPRAR"
+            color = "green"
+        elif punt_sal >= 40:
+            decision = "VENDER"
+            color = "red"
+        elif punt_ent >= 30:
+            decision = "DUDAR"
+            color = "orange"
+        else:
+            decision = "ESPERAR"
+            color = "gray"
+        
+        return {
+            'puntuacion': puntuacion,
+            'decision': decision,
+            'color': color,
+            'precio': ult['Close'],
+            'rsi': ult['RSI'],
+            'asl21': ult['ASL21'],
+            'sma30': ult['SMA_30']
+        }
+    
+    else:  # Modo Completo
+        # Técnico
+        punt = 0
+        if ult['Close'] > ult['EMA_9'] and ult['Close'] > ult['EMA_21']:
+            punt += 20
+        elif ult['Close'] > ult['EMA_21']:
+            punt += 10
+        
+        if ult['MACD'] > ult['MACD_Signal']:
+            punt += 25
+        
+        if ult['RSI'] < 30:
+            punt += 20
+        elif ult['RSI'] > 70:
+            pass
+        else:
+            punt += 5
+        
+        if ult['BB_Pos'] < 20:
+            punt += 15
+        
+        # Chartismo simplificado (solo tendencia)
+        precios = df['Close'].values[-20:]
+        if len(precios) >= 20:
+            pend = np.polyfit(range(20), precios, 1)[0]
+            if pend > 0.002 * precios[-1]:
+                punt += 15
+            elif pend > -0.002 * precios[-1]:
+                punt += 5
+        
+        if punt >= 65:
+            decision = "COMPRAR"
+            color = "green"
+        elif punt >= 45:
+            decision = "DUDAR"
+            color = "orange"
+        else:
+            decision = "NO COMPRAR"
+            color = "red"
+        
+        return {
+            'puntuacion': punt,
+            'decision': decision,
+            'color': color,
+            'precio': ult['Close'],
+            'rsi': ult['RSI'],
+            'asl21': ult['ASL21'],
+            'sma30': ult['SMA_30']
+        }
+
+def obtener_datos_activo(simbolo, intervalo='1d'):
+    """Obtiene datos de un activo (cripto o acción) de forma rápida"""
+    try:
+        if simbolo.endswith('-USD'):
+            # Es cripto - usar exchanges
+            for exchange_name, exchange in [('Kucoin', ccxt.kucoin()), ('Gateio', ccxt.gateio()), ('Bybit', ccxt.bybit())]:
+                try:
+                    exchange.timeout = 10000
+                    simbolo_clean = simbolo.replace('-USD', '/USDT')
+                    timeframe = '1d' if intervalo == '1d' else '1h'
+                    ohlcv = exchange.fetch_ohlcv(simbolo_clean, timeframe=timeframe, limit=50)
+                    if ohlcv and len(ohlcv) > 0:
+                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                        df.set_index('timestamp', inplace=True)
+                        return df, None
+                except:
+                    continue
+            return pd.DataFrame(), None
+        else:
+            # Es acción
+            ticker = yf.Ticker(simbolo)
+            df = ticker.history(period='1mo', interval='1d')
+            return df, ticker.info
+    except:
+        return pd.DataFrame(), None
+
+# ============================================================
+# FUNCIONES PRINCIPALES (igual que antes)
+# ============================================================
 def analisis_chartismo(df):
     precios = df['Close'].values
     orden = max(3, min(10, len(precios)//20))
@@ -151,10 +280,6 @@ def analisis_tecnico_completo(df):
     elif ult['BB_Pos'] > 80:
         señales.append(" Cerca de banda superior")
     
-    if ult['Stoch_K'] < 20 and ult['Stoch_D'] < 20:
-        punt += 15
-        señales.append(" Estocástico sobreventa")
-    
     if punt >= 70:
         rec, acc = " FUERTEMENTE ALCISTA", "COMPRAR"
     elif punt >= 50:
@@ -170,7 +295,7 @@ def analisis_fundamental(simbolo, info):
     punt = 0
     expl = []
     if not info:
-        return {'puntuacion': 0, 'explicaciones': ['No hay datos fundamentales (criptomoneda)'], 'accion': 'N/A'}
+        return {'puntuacion': 0, 'explicaciones': ['No hay datos fundamentales'], 'accion': 'N/A'}
     
     per = info.get('trailingPE')
     if per and per != 'N/A':
@@ -179,33 +304,9 @@ def analisis_fundamental(simbolo, info):
                 punt += 30
                 expl.append(f" PER: {float(per):.2f} (infravalorada)")
         except: pass
-    
-    peg = info.get('pegRatio')
-    if peg and peg != 'N/A':
-        try:
-            if float(peg) < 1:
-                punt += 25
-                expl.append(f" PEG: {float(peg):.2f} (crecimiento barato)")
-        except: pass
-    
-    roe = info.get('returnOnEquity')
-    if roe and roe != 'N/A':
-        try:
-            if float(roe) > 0.15:
-                punt += 25
-                expl.append(f" ROE: {float(roe)*100:.1f}% (rentable)")
-        except: pass
-    
     return {'puntuacion': punt, 'explicaciones': expl, 'accion': 'INVERTIR' if punt>=50 else 'EVITAR'}
 
 def analisis_andystoploss(df):
-    """
-    Método AndyStopLoss
-    PRIORIDAD: ASL21 sobre RSI
-    - Si precio pierde ASL21 -> SEÑAL DE VENTA (evita comprar en caídas libres)
-    - Si precio sobre ASL21 + RSI<30 -> COMPRA
-    - Si precio bajo ASL21 + RSI>70 -> VENTA
-    """
     ult = df.iloc[-1]
     precios = df['Close'].values
     orden = max(3, min(10, len(precios)//20))
@@ -217,52 +318,36 @@ def analisis_andystoploss(df):
     punt_ent, sen_ent = 0, []
     punt_sal, sen_sal = 0, []
     
-    # ========== REGLAS DE ENTRADA (COMPRA) ==========
-    # 1. Soporte (max 30 puntos)
     if soportes and abs(ult['Close'] - soportes[0]) / ult['Close'] < 0.02:
         punt_ent += 30
         sen_ent.append(f" Soporte ${soportes[0]:,.2f}")
     
-    # 2. RSI sobreventa (max 25 puntos)
     if ult['RSI'] < 30:
         punt_ent += 25
         sen_ent.append(f" RSI {ult['RSI']:.0f} (sobreventa)")
     
-    # 3. PRECIO SOBRE ASL21 (CRÍTICO - condiciona entrada)
     if ult['Close'] > ult['ASL21']:
         punt_ent += 15
         sen_ent.append(f" Sobre ASL21 ${ult['ASL21']:,.2f}")
     else:
-        # Si el precio está BAJO ASL21, anula la mayoría de las señales de compra
-        sen_ent.append(f" PRECIO BAJO ASL21 - Señal de COMPRA debilitada")
+        sen_ent.append(f" PRECIO BAJO ASL21 - Señal debilitada")
     
-    # 4. Sobre EMAs largas (max 10 puntos)
-    if ult['Close'] > ult['EMA_150'] and ult['Close'] > ult['EMA_200']:
-        punt_ent += 10
-        sen_ent.append(" Sobre EMAs 150/200")
-    
-    # ========== REGLAS DE SALIDA (VENTA) ==========
-    # 1. Resistencia (max 30 puntos)
     if resistencias and abs(resistencias[0] - ult['Close']) / ult['Close'] < 0.02:
         punt_sal += 30
         sen_sal.append(f" Resistencia ${resistencias[0]:,.2f}")
     
-    # 2. RSI sobrecompra (max 30 puntos)
     if ult['RSI'] > 70:
         punt_sal += 30
         sen_sal.append(f" RSI {ult['RSI']:.0f} (sobrecompra)")
     
-    # 3. PRECIO BAJO ASL21 (CRÍTICO - señal de VENTA prioritaria)
     if ult['Close'] < ult['ASL21']:
-        punt_sal += 35  # Peso alto para priorizar ASL21
-        sen_sal.append(f" PRECIO BAJO ASL21 ${ult['ASL21']:,.2f} - SEÑAL DE VENTA")
+        punt_sal += 35
+        sen_sal.append(f" PRECIO BAJO ASL21 - SEÑAL DE VENTA")
     
-    # 4. Bajo SMA30 (max 20 puntos)
     if ult['Close'] < ult['SMA_30']:
         punt_sal += 20
         sen_sal.append(f" Bajo SMA30 ${ult['SMA_30']:,.2f}")
     
-    # ========== DECISIÓN FINAL ==========
     neta = punt_ent - punt_sal
     
     if neta >= 40 and punt_ent >= 50 and ult['Close'] > ult['ASL21']:
@@ -284,19 +369,10 @@ def analisis_andystoploss(df):
     }
 
 # ------------------------------------------------------------
-# OBTENER DATOS DE CRIPTO - MÚLTIPLES EXCHANGES
+# OBTENER DATOS
 # ------------------------------------------------------------
 def obtener_datos_cripto(simbolo_ccxt, intervalo, limite=200):
-    """Intenta con múltiples exchanges hasta que uno funcione"""
-    
-    exchanges = [
-        ('Kucoin', ccxt.kucoin()),
-        ('Gateio', ccxt.gateio()),
-        ('Bybit', ccxt.bybit()),
-        ('OKX', ccxt.okx()),
-        ('Bitget', ccxt.bitget()),
-    ]
-    
+    exchanges = [('Kucoin', ccxt.kucoin()), ('Gateio', ccxt.gateio()), ('Bybit', ccxt.bybit()), ('OKX', ccxt.okx()), ('Bitget', ccxt.bitget())]
     timeframe_map = {'1d': '1d', '4h': '4h', '45min': '45m', '15min': '15m', '5min': '5m'}
     timeframe = timeframe_map.get(intervalo, '1d')
     
@@ -308,11 +384,9 @@ def obtener_datos_cripto(simbolo_ccxt, intervalo, limite=200):
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 df.set_index('timestamp', inplace=True)
-                st.info(f" Usando {exchange_name} para {simbolo_ccxt}")
                 return df
-        except Exception as e:
+        except:
             continue
-    
     return pd.DataFrame()
 
 def obtener_datos_accion(simbolo, periodo, intervalo):
@@ -328,9 +402,9 @@ def obtener_datos_accion(simbolo, periodo, intervalo):
         df = ticker.history(period=periodo, interval=intervalo_yf)
     return df, ticker
 
-# ------------------------------------------------------------
-# SIDEBAR
-# ------------------------------------------------------------
+# ============================================================
+# SIDEBAR (simplificado)
+# ============================================================
 with st.sidebar:
     st.header(" Configuración")
     
@@ -360,220 +434,273 @@ with st.sidebar:
     
     if modo_analisis == "AndyStopLoss":
         usar_soporte = st.checkbox(" Entrar en SOPORTE (sugerido)", value=True)
-        st.caption(" Reglas AndyStopLoss")
         st.caption("ASL21 prioritario | Si pierde ASL21 → VENDER")
     else:
         usar_soporte = False
-        st.caption(" Modo Completo")
+
+# ============================================================
+# PESTAÑAS PRINCIPALES
+# ============================================================
+tab_analisis, tab_explorador = st.tabs(["📊 Análisis Individual", "🔍 Explorador de Oportunidades"])
 
 # ------------------------------------------------------------
-# PROCESAR ANÁLISIS
+# TAB 1: ANÁLISIS INDIVIDUAL (igual que antes)
 # ------------------------------------------------------------
-if analizar_btn or (st.session_state.datos is not None and simbolo != st.session_state.simbolo):
-    with st.spinner(f'Analizando {simbolo}...'):
-        try:
-            es_cripto = simbolo.endswith('-USD')
-            
-            if es_cripto:
-                simbolo_clean = simbolo.replace('-USD', '/USDT')
-                df = obtener_datos_cripto(simbolo_clean, intervalo, limite=200)
-                if df.empty:
-                    st.error("No se pudieron obtener datos. Probá con BTC/USDT, ETH/USDT, o acciones (KO, AAPL)")
-                    st.stop()
-                fuente = f"Cripto (Kucoin/Gateio/Bybit) - {intervalo}"
-                info = None
-            else:
-                df, ticker = obtener_datos_accion(simbolo, periodo, intervalo)
-                if df.empty:
-                    st.error(f"No se obtuvieron datos de {simbolo}")
-                    st.stop()
-                info = ticker.info
-                fuente = f"Yahoo Finance - {periodo}, {intervalo}"
-            
-            if len(df) < 30:
-                st.warning(f"Solo {len(df)} velas disponibles.")
-            
-            df = calcular_indicadores(df)
-            
-            if modo_analisis == "AndyStopLoss":
-                analisis = analisis_andystoploss(df)
+with tab_analisis:
+    if analizar_btn or (st.session_state.datos is not None and simbolo != st.session_state.simbolo):
+        with st.spinner(f'Analizando {simbolo}...'):
+            try:
+                es_cripto = simbolo.endswith('-USD')
                 
-                if usar_soporte and analisis.get('soportes') and analisis['soportes']:
-                    precio_entrada_sugerido = analisis['soportes'][0]
-                    razon_entrada = f"Soporte detectado en ${precio_entrada_sugerido:,.2f}"
+                if es_cripto:
+                    simbolo_clean = simbolo.replace('-USD', '/USDT')
+                    df = obtener_datos_cripto(simbolo_clean, intervalo, limite=200)
+                    if df.empty:
+                        st.error("No se pudieron obtener datos. Probá con BTC/USDT, ETH/USDT, o acciones (KO, AAPL)")
+                        st.stop()
+                    fuente = f"Cripto (Kucoin/Gateio/Bybit) - {intervalo}"
+                    info = None
                 else:
+                    df, ticker = obtener_datos_accion(simbolo, periodo, intervalo)
+                    if df.empty:
+                        st.error(f"No se obtuvieron datos de {simbolo}")
+                        st.stop()
+                    info = ticker.info
+                    fuente = f"Yahoo Finance - {periodo}, {intervalo}"
+                
+                if len(df) < 30:
+                    st.warning(f"Solo {len(df)} velas disponibles.")
+                
+                df = calcular_indicadores(df)
+                
+                if modo_analisis == "AndyStopLoss":
+                    analisis = analisis_andystoploss(df)
+                    
+                    if usar_soporte and analisis.get('soportes') and analisis['soportes']:
+                        precio_entrada_sugerido = analisis['soportes'][0]
+                        razon_entrada = f"Soporte detectado en ${precio_entrada_sugerido:,.2f}"
+                    else:
+                        precio_entrada_sugerido = analisis['precio']
+                        razon_entrada = "Precio actual"
+                    
+                else:
+                    analisis_tecnico = analisis_tecnico_completo(df)
+                    chartismo = analisis_chartismo(df)
+                    fundamental = analisis_fundamental(simbolo, info)
+                    
+                    punt_total = analisis_tecnico['puntuacion'] * 0.5 + chartismo['puntuacion'] * 0.3 + fundamental['puntuacion'] * 0.2
+                    
+                    if punt_total >= 65:
+                        decision, color = " COMPRAR", "green"
+                    elif punt_total >= 45:
+                        decision, color = " DUDAR", "orange"
+                    else:
+                        decision, color = " NO COMPRAR", "red"
+                    
+                    analisis = {
+                        'puntuacion': punt_total,
+                        'decision': decision,
+                        'color': color,
+                        'precio': analisis_tecnico['precio'],
+                        'rsi': analisis_tecnico['rsi'],
+                        'sen_ent': analisis_tecnico['señales'][:4],
+                        'sen_sal': chartismo['figuras'][:2] if chartismo['figuras'] else [],
+                        'soportes': chartismo['soportes'],
+                        'resistencias': chartismo['resistencias'],
+                        'asl21': df['ASL21'].iloc[-1],
+                        'sma30': df['SMA_30'].iloc[-1]
+                    }
                     precio_entrada_sugerido = analisis['precio']
                     razon_entrada = "Precio actual"
                 
-            else:
-                analisis_tecnico = analisis_tecnico_completo(df)
-                chartismo = analisis_chartismo(df)
-                fundamental = analisis_fundamental(simbolo, info)
+                st.session_state.datos = df
+                st.session_state.analisis = analisis
+                st.session_state.simbolo = simbolo
+                st.session_state.modo_analisis = modo_analisis
+                st.session_state.precio_entrada_sugerido = precio_entrada_sugerido
+                st.session_state.razon_entrada = razon_entrada
+                st.session_state.sl_pct = sl_pct
+                st.session_state.tp1_pct = tp1_pct
+                st.session_state.tp2_pct = tp2_pct
+                st.session_state.capital_total = capital_total
+                st.session_state.riesgo_cap_pct = riesgo_cap_pct
                 
-                punt_total = analisis_tecnico['puntuacion'] * 0.5 + chartismo['puntuacion'] * 0.3
-                if fundamental:
-                    punt_total += fundamental['puntuacion'] * 0.2
+                st.success(f" {simbolo.upper()} - {len(df)} velas - {fuente}")
                 
-                if punt_total >= 65:
-                    decision, color = " COMPRAR", "green"
-                elif punt_total >= 45:
-                    decision, color = " DUDAR", "orange"
-                else:
-                    decision, color = " NO COMPRAR", "red"
-                
-                analisis = {
-                    'puntuacion': punt_total,
-                    'decision': decision,
-                    'color': color,
-                    'precio': analisis_tecnico['precio'],
-                    'rsi': analisis_tecnico['rsi'],
-                    'sen_ent': analisis_tecnico['señales'][:4],
-                    'sen_sal': chartismo['figuras'][:2] if chartismo['figuras'] else [],
-                    'soportes': chartismo['soportes'],
-                    'resistencias': chartismo['resistencias'],
-                    'asl21': df['ASL21'].iloc[-1],
-                    'sma30': df['SMA_30'].iloc[-1],
-                    'fundamental_punt': fundamental['puntuacion'],
-                    'tecnico_punt': analisis_tecnico['puntuacion'],
-                    'chartismo_punt': chartismo['puntuacion']
-                }
-                
-                precio_entrada_sugerido = analisis['precio']
-                razon_entrada = "Precio actual según análisis técnico"
+            except Exception as e:
+                st.error(f"Error: {e}")
+                st.stop()
+    
+    if st.session_state.analisis is not None:
+        a = st.session_state.analisis
+        df = st.session_state.datos
+        modo = st.session_state.modo_analisis
+        
+        precio_entrada = st.session_state.precio_entrada_sugerido
+        stop_loss = precio_entrada * (1 - sl_pct/100)
+        tp1 = precio_entrada * (1 + tp1_pct/100)
+        tp2 = precio_entrada * (1 + tp2_pct/100)
+        
+        perdida_max = capital_total * riesgo_cap_pct / 100
+        capital_invertir = min(perdida_max / (sl_pct/100) if sl_pct > 0 else 0, capital_total)
+        cantidad = capital_invertir / precio_entrada if precio_entrada > 0 else 0
+        perdida_esperada = cantidad * (precio_entrada - stop_loss)
+        reward_risk = (tp1 - precio_entrada) / (precio_entrada - stop_loss) if (precio_entrada - stop_loss) > 0 else 0
+        
+        st.markdown(f"""
+        <div style='background-color:{a['color']}20; padding:6px; border-radius:12px; margin-bottom:10px; text-align:center'>
+            <h2 style='margin:0; color:{a['color']}'>{a['decision']}</h2>
+            <p style='margin:0; font-size:0.8rem'>Modo: {modo} | Velas: {len(df)}</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("---")
+        
+        if a['decision'] in [" COMPRAR", " DUDAR"]:
+            st.subheader(" CONFIGURAR ALERTA EN TRADINGVIEW")
+            col_alerta1, col_alerta2 = st.columns([1, 1])
+            with col_alerta1:
+                st.markdown(f"""
+                <div style='background-color:#1e3a5f; padding:10px; border-radius:10px; margin:5px 0'>
+                    <h4 style='margin:0'> PRECIO DE ENTRADA</h4>
+                    <p style='font-size:24px; margin:5px 0'><b>${precio_entrada:,.2f}</b></p>
+                    <p style='margin:0; font-size:12px'>{st.session_state.razon_entrada}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            with col_alerta2:
+                st.markdown(f"""
+                <div style='background-color:#2d2d2d; padding:10px; border-radius:10px; margin:5px 0'>
+                    <h4 style='margin:0'> STOP LOSS</h4>
+                    <p style='font-size:20px; margin:5px 0'><b>${stop_loss:,.2f}</b></p>
+                    <p style='margin:0; font-size:12px'>Pérdida: -${abs(perdida_esperada):,.0f} ({sl_pct:.0f}%)</p>
+                </div>
+                """, unsafe_allow_html=True)
             
-            st.session_state.datos = df
-            st.session_state.analisis = analisis
-            st.session_state.simbolo = simbolo
-            st.session_state.modo_analisis = modo_analisis
-            st.session_state.info = info
-            st.session_state.precio_entrada_sugerido = precio_entrada_sugerido
-            st.session_state.razon_entrada = razon_entrada
-            st.session_state.sl_pct = sl_pct
-            st.session_state.tp1_pct = tp1_pct
-            st.session_state.tp2_pct = tp2_pct
-            st.session_state.capital_total = capital_total
-            st.session_state.riesgo_cap_pct = riesgo_cap_pct
-            
-            st.success(f" {simbolo.upper()} - {len(df)} velas - {fuente}")
-            
-        except Exception as e:
-            st.error(f"Error: {e}")
-            st.stop()
-
-# ------------------------------------------------------------
-# MOSTRAR RESULTADOS
-# ------------------------------------------------------------
-if st.session_state.analisis is not None:
-    a = st.session_state.analisis
-    df = st.session_state.datos
-    modo = st.session_state.modo_analisis
-    
-    precio_entrada = st.session_state.precio_entrada_sugerido
-    sl_pct = st.session_state.sl_pct
-    tp1_pct = st.session_state.tp1_pct
-    tp2_pct = st.session_state.tp2_pct
-    capital_total = st.session_state.capital_total
-    riesgo_cap_pct = st.session_state.riesgo_cap_pct
-    
-    stop_loss = precio_entrada * (1 - sl_pct/100)
-    tp1 = precio_entrada * (1 + tp1_pct/100)
-    tp2 = precio_entrada * (1 + tp2_pct/100)
-    
-    perdida_max = capital_total * riesgo_cap_pct / 100
-    sl_decimal = sl_pct / 100
-    capital_invertir = min(perdida_max / sl_decimal if sl_decimal > 0 else 0, capital_total)
-    cantidad = capital_invertir / precio_entrada if precio_entrada > 0 else 0
-    perdida_esperada = cantidad * (precio_entrada - stop_loss)
-    ganancia_tp1 = cantidad * (tp1 - precio_entrada)
-    ganancia_tp2 = cantidad * (tp2 - precio_entrada)
-    riesgo_real = (perdida_esperada / capital_total) * 100 if capital_total > 0 else 0
-    reward_risk = (tp1 - precio_entrada) / (precio_entrada - stop_loss) if (precio_entrada - stop_loss) > 0 else 0
-    
-    # Tarjeta de decisión
-    st.markdown(f"""
-    <div style='background-color:{a['color']}20; padding:6px; border-radius:12px; margin-bottom:10px; text-align:center'>
-        <h2 style='margin:0; color:{a['color']}'>{a['decision']}</h2>
-        <p style='margin:0; font-size:0.8rem'>Modo: {modo} | Velas: {len(df)} | Entrada: {a.get('punt_ent', 0)} | Salida: {a.get('punt_sal', 0)}</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # ============================================================
-    # SECCIÓN DE ALERTA - SOLO PARA COMPRA O DUDAR
-    # ============================================================
-    st.markdown("---")
-    
-    if a['decision'] in [" COMPRAR", " DUDAR"]:
-        st.subheader(" CONFIGURAR ALERTA EN TRADINGVIEW")
+            mensaje_alerta = f" ALERTA {simbolo.upper()}! Precio alcanzó ${precio_entrada:,.2f} | Stop Loss: ${stop_loss:,.2f} ({sl_pct:.0f}%) | Take Profit 1: ${tp1:,.2f} ({tp1_pct:.0f}%) | Take Profit 2: ${tp2:,.2f} ({tp2_pct:.0f}%) | Invertir: ${capital_invertir:,.0f} ({riesgo_cap_pct:.0f}% del capital)"
+            st.code(mensaje_alerta, language="text")
+        else:
+            st.info("📌 **La señal actual es VENDER o ESPERAR. No se sugiere entrada en este momento.**")
         
-        col_alerta1, col_alerta2 = st.columns([1, 1])
-        with col_alerta1:
-            st.markdown(f"""
-            <div style='background-color:#1e3a5f; padding:10px; border-radius:10px; margin:5px 0'>
-                <h4 style='margin:0'> PRECIO DE ENTRADA</h4>
-                <p style='font-size:24px; margin:5px 0'><b>${precio_entrada:,.2f}</b></p>
-                <p style='margin:0; font-size:12px'>{st.session_state.razon_entrada}</p>
-            </div>
-            """, unsafe_allow_html=True)
+        st.markdown("---")
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1: st.metric(" Precio Actual", f"${a['precio']:,.2f}")
+        with col2: st.metric(" RSI", f"{a['rsi']:.0f}")
+        with col3: st.metric(" ASL21", f"${a.get('asl21', 0):,.2f}")
+        with col4: st.metric(" SMA30", f"${a.get('sma30', 0):,.2f}")
+        with col5: st.metric(" Entrada Objetivo", f"${precio_entrada:,.2f}")
         
-        with col_alerta2:
-            st.markdown(f"""
-            <div style='background-color:#2d2d2d; padding:10px; border-radius:10px; margin:5px 0'>
-                <h4 style='margin:0'> STOP LOSS</h4>
-                <p style='font-size:20px; margin:5px 0'><b>${stop_loss:,.2f}</b></p>
-                <p style='margin:0; font-size:12px'>Pérdida: -${abs(perdida_esperada):,.0f} ({sl_pct:.0f}%)</p>
-            </div>
-            """, unsafe_allow_html=True)
+        col_ent, col_sal = st.columns(2)
+        with col_ent:
+            st.caption(" **Señales Positivas**")
+            for s in a.get('sen_ent', ['No hay señales'])[:3]:
+                st.write(f"- {s}")
+        with col_sal:
+            st.caption(" **Señales Negativas**")
+            for s in a.get('sen_sal', ['No hay señales'])[:3]:
+                st.write(f"- {s}")
         
-        st.markdown("###  Cómo configurar la alerta en TradingView:")
-        
-        mensaje_alerta = f" ALERTA {st.session_state.simbolo.upper()}! Precio alcanzó ${precio_entrada:,.2f} | Stop Loss: ${stop_loss:,.2f} ({sl_pct:.0f}%) | Take Profit 1: ${tp1:,.2f} ({tp1_pct:.0f}%) | Take Profit 2: ${tp2:,.2f} ({tp2_pct:.0f}%) | Invertir: ${capital_invertir:,.0f} ({riesgo_cap_pct:.0f}% del capital)"
-        
-        st.code(mensaje_alerta, language="text")
-    else:
-        st.info("📌 **La señal actual es VENDER o ESPERAR. No se sugiere entrada en este momento.**")
-        st.caption("Según el método AndyStopLoss, cuando el precio pierde ASL21, la prioridad es VENDER/ESPERAR, evitando comprar en caídas libres.")
-    
-    # Métricas principales
-    st.markdown("---")
-    col1, col2, col3, col4, col5 = st.columns(5)
-    with col1: st.metric(" Precio Actual", f"${a['precio']:,.2f}")
-    with col2: st.metric(" RSI", f"{a['rsi']:.0f}")
-    with col3: st.metric(" ASL21", f"${a.get('asl21', 0):,.2f}")
-    with col4: st.metric(" SMA30", f"${a.get('sma30', 0):,.2f}")
-    with col5: st.metric(" Entrada Objetivo", f"${precio_entrada:,.2f}")
-    
-    # Señales
-    col_ent, col_sal = st.columns(2)
-    with col_ent:
-        st.caption(" **Señales Positivas**")
-        for s in a.get('sen_ent', ['No hay señales'])[:3]:
-            st.write(f"- {s}")
-    with col_sal:
-        st.caption(" **Señales Negativas**")
-        for s in a.get('sen_sal', ['No hay señales'])[:3]:
-            st.write(f"- {s}")
-    
-    # Gráficos
-    st.markdown("---")
-    tab1, tab2 = st.tabs([" Gráfico Principal", " RSI"])
-    with tab1:
+        st.markdown("---")
         fig = go.Figure()
         fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Velas'))
         fig.add_trace(go.Scatter(x=df.index, y=df['EMA_9'], name='EMA 9', line=dict(color='orange', width=1)))
         fig.add_trace(go.Scatter(x=df.index, y=df['ASL21'], name='ASL21', line=dict(color='purple', width=2)))
         fig.add_trace(go.Scatter(x=df.index, y=df['SMA_30'], name='SMA30', line=dict(color='red', dash='dash')))
-        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_150'], name='EMA150', line=dict(color='blue', width=1, dash='dot')))
-        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_200'], name='EMA200', line=dict(color='cyan', width=1, dash='dot')))
         fig.add_hline(y=precio_entrada, line_dash="dash", line_color="green", annotation_text=f"ENTRADA ${precio_entrada:,.2f}")
         fig.add_hline(y=stop_loss, line_dash="dash", line_color="red", annotation_text=f"STOP ${stop_loss:,.2f}")
-        fig.update_layout(height=480, margin=dict(l=0,r=0,t=30,b=0), template='plotly_dark')
+        fig.update_layout(height=450, margin=dict(l=0,r=0,t=30,b=0), template='plotly_dark')
         st.plotly_chart(fig, use_container_width=True)
+
+# ------------------------------------------------------------
+# TAB 2: EXPLORADOR DE OPORTUNIDADES (NUEVO)
+# ------------------------------------------------------------
+with tab_explorador:
+    st.subheader("🔍 Buscador Automático de Oportunidades")
+    st.caption("Analiza automáticamente una lista de activos y muestra los 5 mejores según el modo seleccionado")
     
-    with tab2:
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=df.index, y=df['RSI'], name='RSI', line=dict(color='purple', width=2)))
-        fig2.add_trace(go.Scatter(x=df.index, y=df['RSI_ASL21'], name='RSI ASL21', line=dict(color='orange', width=1, dash='dash')))
-        fig2.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Sobrecompra (70)")
-        fig2.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Sobreventa (30)")
-        fig2.update_layout(height=400, margin=dict(l=0,r=0,t=30,b=0), template='plotly_dark')
-        st.plotly_chart(fig2, use_container_width=True)
+    col_filtro1, col_filtro2, col_filtro3 = st.columns(3)
+    with col_filtro1:
+        categoria = st.selectbox("Categoría:", ["Todas", "Cripto", "Acciones US", "Acciones AR"], index=0)
+    with col_filtro2:
+        modo_explorador = st.selectbox("Modo de análisis:", ["AndyStopLoss", "Completo"], index=0)
+    with col_filtro3:
+        top_n = st.selectbox("Mostrar:", [5, 10, 15], index=0)
+    
+    # Seleccionar activos según categoría
+    if categoria == "Cripto":
+        activos = ACTIVOS_POR_DEFECTO["Cripto"]
+    elif categoria == "Acciones US":
+        activos = ACTIVOS_POR_DEFECTO["Acciones US"]
+    elif categoria == "Acciones AR":
+        activos = ACTIVOS_POR_DEFECTO["Acciones AR"]
+    else:
+        activos = ACTIVOS_POR_DEFECTO["Cripto"] + ACTIVOS_POR_DEFECTO["Acciones US"] + ACTIVOS_POR_DEFECTO["Acciones AR"]
+    
+    if st.button("🚀 BUSCAR OPORTUNIDADES", type="primary", use_container_width=True):
+        resultados = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, activo in enumerate(activos):
+            status_text.text(f"Analizando {activo} ({i+1}/{len(activos)})...")
+            progress_bar.progress((i+1)/len(activos))
+            
+            df, _ = obtener_datos_activo(activo, intervalo='1d')
+            if df.empty or len(df) < 30:
+                continue
+            
+            df = calcular_indicadores(df)
+            resultado = analisis_completo_para_explorador(df, modo_explorador)
+            
+            resultados.append({
+                'Símbolo': activo,
+                'Precio': resultado['precio'],
+                'Puntuación': resultado['puntuacion'],
+                'Decisión': resultado['decision'],
+                'RSI': resultado['rsi'],
+                'ASL21': resultado['asl21'],
+                'Distancia ASL21': ((resultado['precio'] - resultado['asl21']) / resultado['asl21']) * 100
+            })
+            
+            time.sleep(0.3)  # Pequeña pausa para no sobrecargar APIs
+        
+        progress_bar.empty()
+        status_text.empty()
+        
+        if resultados:
+            df_resultados = pd.DataFrame(resultados)
+            df_resultados = df_resultados.sort_values('Puntuación', ascending=False).head(top_n)
+            
+            # Mostrar TOP
+            st.markdown(f"### 🏆 TOP {top_n} MEJORES OPORTUNIDADES")
+            st.markdown(f"**Modo:** {modo_explorador}")
+            
+            for idx, row in df_resultados.iterrows():
+                if row['Decisión'] == "COMPRAR":
+                    emoji, color = "🟢", "green"
+                elif row['Decisión'] == "DUDAR":
+                    emoji, color = "🟡", "orange"
+                else:
+                    emoji, color = "🔴", "red"
+                
+                st.markdown(f"""
+                <div style='border-left: 4px solid {color}; padding: 8px; margin: 8px 0; background-color: #1e1e1e; border-radius: 8px'>
+                    <h4 style='margin:0'>{emoji} {row['Símbolo']} - {row['Decisión']}</h4>
+                    <table style='width:100%; font-size:14px'>
+                        <tr>
+                            <td>💰 Precio: <b>${row['Precio']:,.2f}</b></td>
+                            <td>📊 Puntuación: <b>{row['Puntuación']:.0f}</b></td>
+                            <td>📈 RSI: <b>{row['RSI']:.0f}</b></td>
+                        </tr>
+                        <tr>
+                            <td>🟣 ASL21: ${row['ASL21']:,.2f}</td>
+                            <td colspan="2">📏 Distancia ASL21: <b>{row['Distancia ASL21']:+.1f}%</b></td>
+                        </tr>
+                    </table>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Mostrar tabla completa
+            with st.expander("📋 Ver todos los resultados (tabla completa)"):
+                st.dataframe(df_resultados, use_container_width=True)
+        else:
+            st.error("No se pudieron analizar activos. Verifica tu conexión.")
